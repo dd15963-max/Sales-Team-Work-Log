@@ -1,0 +1,504 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Save, Plus, Minus, Trash2, Calendar, FileSpreadsheet, Loader2 } from 'lucide-react';
+
+// --- 설정 데이터 ---
+const TASK_CATEGORIES = {
+  "회의": ["프로젝트 회의", "영업2팀 회의", "기타 회의"],
+  "미팅": ["내방미팅", "현장미팅", "화상미팅"],
+  "메일작성": ["견적", "제안", "소재 판매", "기술 대응", "기타"],
+  "팔로우업": ["업체명(직접입력)"],
+  "인바운드": ["홈페이지", "전화", "메일", "채널톡", "기타"],
+  "아웃바운드": ["DB수집", "콜드메일", "콜드콜", "현장영업", "전시회", "기타"],
+  "샘플제작": ["BMT", "출력서비스", "전시회", "기타"],
+  "문서작업": ["영업자료제작", "제안서 작성", "견적서 작성", "기타"],
+  "기타": ["직접입력"],
+  "점심식사": ["점심식사"],
+  "휴가": ["연차", "반차(오전)", "반차(오후)", "반반차", "공휴일", "기타"]
+};
+
+// 🌟 구글 앱스 스크립트 웹 앱 URL
+const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwMVxpc9xwwhVzgtcbS7xuP4T6S8jaL6wec2ZFCUIFIgiLIK27r_-6UjkRwb4Z3CABlzA/exec";
+
+// --- 날짜 및 시간 헬퍼 함수 ---
+const getMonday = (d) => {
+  const date = new Date(d);
+  const day = date.getDay();
+  const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+  return new Date(date.setDate(diff));
+};
+
+const addDays = (date, days) => {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+};
+
+const formatDateStr = (date) => {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const days = ['일', '월', '화', '수', '목', '금', '토'];
+  const dayName = days[date.getDay()];
+  return `${yyyy}.${mm}.${dd} (${dayName})`;
+};
+
+const calculateEndTime = (startTime, durationMinutes) => {
+  if (!startTime || !durationMinutes) return "";
+  const [hours, minutes] = startTime.split(':').map(Number);
+  if (isNaN(hours) || isNaN(minutes)) return "";
+  
+  const totalMinutes = hours * 60 + minutes + Number(durationMinutes);
+  const endH = Math.floor(totalMinutes / 60) % 24;
+  const endM = totalMinutes % 60;
+  
+  return `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+};
+
+export default function App() {
+  const [baseDate, setBaseDate] = useState(getMonday(new Date("2026-02-23"))); 
+  const [logs, setLogs] = useState({}); 
+  const [department, setDepartment] = useState("국내영업");
+  const [employeeName, setEmployeeName] = useState("백상민");
+  const [isSaving, setIsSaving] = useState(false);
+
+  const [colWidths, setColWidths] = useState({
+    no: 48,
+    category: 130,
+    subCategory: 176,
+    details: 280,
+    remarks: 176,
+    startTime: 128,
+    duration: 96,
+    endTime: 128,
+    hours: 96,
+    action: 50
+  });
+  const [rowHeights, setRowHeights] = useState({});
+
+  const weekDates = Array.from({ length: 7 }, (_, i) => addDays(baseDate, i));
+  const endDateStr = formatDateStr(weekDates[6]).split(' ')[0];
+
+  useEffect(() => {
+    const initialLogs = {};
+    weekDates.forEach(date => {
+      const dateKey = formatDateStr(date);
+      const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+      initialLogs[dateKey] = isWeekend ? [] : [createEmptyRow(), createEmptyRow(), createEmptyRow()];
+    });
+    setLogs(initialLogs);
+  }, [baseDate]);
+
+  const createEmptyRow = () => ({
+    id: crypto.randomUUID(),
+    category: "",
+    subCategory: "",
+    details: "",
+    remarks: "",
+    startTime: "09:00",
+    duration: "", 
+    endTime: "",
+    hours: "0.00"
+  });
+
+  const handleDateChange = (e) => {
+    const selectedDate = new Date(e.target.value);
+    setBaseDate(getMonday(selectedDate));
+  };
+
+  const handleRowChange = (dateKey, rowId, field, value) => {
+    setLogs(prev => {
+      const dayLogs = [...prev[dateKey]];
+      const rowIndex = dayLogs.findIndex(r => r.id === rowId);
+      
+      if (rowIndex === -1) return prev;
+
+      dayLogs[rowIndex] = { ...dayLogs[rowIndex], [field]: value };
+      if (field === 'category') dayLogs[rowIndex].subCategory = "";
+
+      if (field === 'startTime' || field === 'duration') {
+        for (let i = rowIndex; i < dayLogs.length; i++) {
+          if (i > rowIndex && dayLogs[i - 1].endTime) {
+            dayLogs[i].startTime = dayLogs[i - 1].endTime;
+          }
+          dayLogs[i].endTime = calculateEndTime(dayLogs[i].startTime, dayLogs[i].duration);
+          dayLogs[i].hours = dayLogs[i].duration ? (Number(dayLogs[i].duration) / 60).toFixed(2) : "0.00";
+        }
+      }
+      
+      return { ...prev, [dateKey]: dayLogs };
+    });
+  };
+
+  const addRow = (dateKey) => {
+    setLogs(prev => {
+      const dayLogs = prev[dateKey] || [];
+      const lastRow = dayLogs.length > 0 ? dayLogs[dayLogs.length - 1] : null;
+      const newStartTime = (lastRow && lastRow.endTime) ? lastRow.endTime : "09:00";
+      
+      return { 
+        ...prev, 
+        [dateKey]: [...dayLogs, { ...createEmptyRow(), startTime: newStartTime }] 
+      };
+    });
+  };
+
+  const removeLastRow = (dateKey) => {
+    setLogs(prev => {
+      if (!prev[dateKey] || prev[dateKey].length === 0) return prev;
+      return { ...prev, [dateKey]: prev[dateKey].slice(0, -1) };
+    });
+  };
+
+  const removeSpecificRow = (dateKey, rowId) => {
+    setLogs(prev => {
+      const newDayLogs = prev[dateKey].filter(row => row.id !== rowId);
+      for (let i = 0; i < newDayLogs.length; i++) {
+        if (i > 0 && newDayLogs[i - 1].endTime) {
+          newDayLogs[i].startTime = newDayLogs[i - 1].endTime;
+        }
+        newDayLogs[i].endTime = calculateEndTime(newDayLogs[i].startTime, newDayLogs[i].duration);
+        newDayLogs[i].hours = newDayLogs[i].duration ? (Number(newDayLogs[i].duration) / 60).toFixed(2) : "0.00";
+      }
+      return { ...prev, [dateKey]: newDayLogs };
+    });
+  };
+
+  const handleSaveAndNext = async () => {
+    setIsSaving(true);
+    try {
+      const exportData = [];
+      let isFirstRowOverall = true; 
+      
+      // 🌟 저장 시점에 정확한 통계를 한 번 더 계산해서 추출
+      let currentTotalTasks = 0;
+      let currentTotalHours = 0;
+
+      Object.entries(logs).forEach(([dateKey, dayLogs]) => {
+        let isFirstRowForDay = true; 
+
+        dayLogs.forEach(row => {
+          if (row.category || row.details) { 
+            exportData.push([
+              isFirstRowOverall ? employeeName : "",    
+              isFirstRowOverall ? department : "",      
+              isFirstRowForDay ? dateKey : "",          
+              row.category,
+              row.subCategory,
+              row.details,
+              row.remarks,
+              row.startTime,
+              row.duration,
+              row.endTime,
+              row.hours
+            ]);
+            
+            isFirstRowOverall = false;
+            isFirstRowForDay = false;
+          }
+
+          // 제외 조건 반영된 통계
+          const isExcluded = row.category === "점심식사" || row.category === "휴가";
+          if (row.category && !isExcluded) currentTotalTasks++;
+          if (row.hours && !isExcluded) currentTotalHours += Number(row.hours);
+        });
+      });
+
+      if (exportData.length === 0) {
+        alert("저장할 내용이 없습니다. (업무구분이나 업무내용을 한 칸이라도 입력해주세요!)");
+        setIsSaving(false); 
+        return;
+      }
+
+      // 🌟 완벽하게 계산된 비율
+      const currentWorkRatio = currentTotalTasks > 0 ? ((currentTotalHours / 52) * 100).toFixed(1) : "0.0";
+      const startDay = formatDateStr(weekDates[0]).split(' ')[0];
+      const newSheetName = `${startDay} ${employeeName}`;
+
+      // 구글로 데이터 전송 시 요약 정보(summary)도 함께 포함
+      await fetch(GOOGLE_SCRIPT_URL, {
+        method: 'POST',
+        mode: 'no-cors',
+        body: JSON.stringify({ 
+          sheetName: newSheetName,
+          rows: exportData,
+          summary: {
+            tasks: currentTotalTasks,
+            hours: currentTotalHours.toFixed(2),
+            ratio: currentWorkRatio
+          }
+        }) 
+      });
+      
+      alert(`${startDay} ~ 주간 업무일지가 구글 시트에 [${newSheetName}] 탭으로 저장되었습니다!`);
+      setBaseDate(prev => addDays(prev, 7));
+      
+    } catch (error) {
+      console.error("저장 오류:", error);
+      alert("네트워크 오류로 저장을 실패했습니다.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const startColResize = (e, colKey) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = colWidths[colKey];
+
+    const handleMouseMove = (moveEvent) => {
+      const delta = moveEvent.clientX - startX;
+      setColWidths(prev => ({ ...prev, [colKey]: Math.max(50, startWidth + delta) })); 
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const startRowResize = (e, rowId) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = e.currentTarget.parentElement.offsetHeight; 
+
+    const handleMouseMove = (moveEvent) => {
+      const delta = moveEvent.clientY - startY;
+      setRowHeights(prev => ({ ...prev, [rowId]: Math.max(48, startHeight + delta) })); 
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+
+  let totalTasks = 0;
+  let totalHours = 0;
+  Object.values(logs).forEach(dayLogs => {
+    dayLogs.forEach(row => {
+      const isExcluded = row.category === "점심식사" || row.category === "휴가";
+      
+      if (row.category && !isExcluded) totalTasks++;
+      if (row.hours && !isExcluded) totalHours += Number(row.hours);
+    });
+  });
+  const workRatio = totalTasks > 0 ? ((totalHours / 52) * 100).toFixed(1) : "0.0";
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-2 md:p-6 font-sans text-sm">
+      <div className="max-w-[1400px] mx-auto bg-white shadow-xl rounded-xl border border-gray-200 overflow-hidden">
+        
+        {/* 상단 타이틀 영역 */}
+        <div className="p-6 pb-4 border-b border-gray-200">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-3 text-2xl font-bold text-gray-800">
+                <span>기간</span>
+                <div className="flex items-center gap-2 bg-gray-100 px-3 py-1.5 rounded-md">
+                  <input 
+                    type="date" 
+                    className="bg-transparent border-none outline-none font-semibold text-gray-700 cursor-pointer text-xl"
+                    value={baseDate.toISOString().split('T')[0]}
+                    onChange={handleDateChange}
+                  />
+                </div>
+                <span>~ {endDateStr}</span>
+              </div>
+              <div className="flex items-center gap-2 text-2xl font-bold text-gray-800">
+                <input 
+                  type="text" 
+                  value={employeeName} 
+                  onChange={(e) => setEmployeeName(e.target.value)}
+                  className="w-24 border-b-2 border-transparent hover:border-gray-300 focus:border-indigo-500 outline-none text-blue-800"
+                />
+                <span>Daily 업무현황</span>
+              </div>
+            </div>
+            
+            <button 
+              onClick={handleSaveAndNext}
+              disabled={isSaving}
+              className={`flex items-center gap-2 text-white rounded-lg px-10 py-5 font-bold text-2xl shadow-md transition-colors ${isSaving ? 'bg-indigo-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+            >
+              {isSaving ? <Loader2 className="animate-spin" size={28} /> : <Save size={28} />}
+              {isSaving ? '저장 중...' : '저장'}
+            </button>
+          </div>
+        </div>
+
+        {/* 요약 현황판 */}
+        <div className="p-6 pb-4">
+          <div className="flex items-center gap-2 mb-2 text-indigo-900 font-bold text-base">
+            <FileSpreadsheet size={18} />
+            <span>주간 일별 업무관리</span>
+          </div>
+          <div className="w-full border-2 border-purple-900 rounded-md overflow-hidden">
+            <div className="flex bg-purple-900 text-white text-center font-bold text-xs uppercase tracking-wider">
+              <div className="w-48 py-2.5 border-r border-purple-700">부서</div>
+              <div className="flex-1 py-2.5 border-r border-purple-700">주간 업무 통계 (주당 52시간 근무시간 기준)</div>
+              <div className="w-24 py-2.5 border-r border-purple-700">주간업무건</div>
+              <div className="w-28 py-2.5 border-r border-purple-700">실제업무시간</div>
+              <div className="w-28 py-2.5">업무시간 비율(%)</div>
+            </div>
+            <div className="flex bg-white text-center font-bold items-stretch">
+              <div className="w-48 bg-[#00FF00] border-r border-purple-900 flex items-center justify-center p-1">
+                <input 
+                  type="text" 
+                  value={department}
+                  onChange={(e) => setDepartment(e.target.value)}
+                  className="bg-transparent text-center outline-none w-full text-black text-base"
+                />
+              </div>
+              <div className="flex-1 py-2 text-gray-700 border-r border-purple-900 flex items-center justify-center">
+                전체 주간업무 : <span className="text-purple-700 mx-1.5">{totalTasks}</span>건 / 실제 업무시간 : <span className="text-purple-700 mx-1.5">{totalHours.toFixed(2)}</span>시간 ({workRatio}%)
+              </div>
+              <div className="w-24 py-2 text-purple-900 border-r border-purple-900 flex items-center justify-center text-lg">{totalTasks}</div>
+              <div className="w-28 py-2 text-purple-900 border-r border-purple-900 flex items-center justify-center text-lg">{totalHours.toFixed(2)}</div>
+              <div className="w-28 py-2 text-purple-900 flex items-center justify-center text-lg">{workRatio}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* 🌟 엑셀형 표 영역 */}
+        <div className="overflow-x-auto bg-white border-t-2 border-purple-900 custom-scrollbar">
+          <div className="min-w-max pb-10">
+            
+            {/* 메인 테이블 헤더 */}
+            <div className="flex text-center font-bold text-purple-900 text-[13px] border-b-2 border-purple-900 bg-purple-50">
+              {Object.entries({
+                no: 'No', category: '업무구분', subCategory: '상세구분', details: '업무내용', 
+                remarks: '비고', startTime: '시작시간', duration: '수행시간', endTime: '종료시간', hours: '시간', action: ''
+              }).map(([key, label]) => (
+                <div key={key} style={{ width: colWidths[key], minWidth: colWidths[key], flexShrink: 0 }} className="relative flex items-center justify-center py-3 border-r border-purple-200">
+                  {label}
+                  <div 
+                    onMouseDown={(e) => startColResize(e, key)} 
+                    className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize bg-transparent hover:bg-purple-400 opacity-50 z-10 transition-colors"
+                  />
+                </div>
+              ))}
+            </div>
+
+            {/* 일자별 데이터 영역 */}
+            {weekDates.map((date) => {
+              const dateKey = formatDateStr(date);
+              const dayLogs = logs[dateKey] || [];
+              const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+              
+              const dayTotalHours = dayLogs.reduce((sum, row) => {
+                if (row.category === "점심식사" || row.category === "휴가") return sum;
+                return sum + Number(row.hours || 0);
+              }, 0);
+
+              const leftSectionWidth = colWidths.no + colWidths.category + colWidths.subCategory + colWidths.details + colWidths.remarks;
+
+              return (
+                <div key={dateKey} className="border-b border-gray-300">
+                  
+                  {/* 날짜 요약 행 */}
+                  <div className={`flex items-stretch font-bold border-b border-gray-200 ${isWeekend ? 'bg-red-50 text-red-800' : 'bg-[#F9E8F3] text-purple-900'}`}>
+                    <div style={{ width: leftSectionWidth, flexShrink: 0 }} className="flex items-center px-6 gap-4 py-2 border-r border-purple-200/50">
+                      <span className="text-base shrink-0">{dateKey}</span>
+                      <div className="flex gap-2 shrink-0">
+                        <button onClick={() => addRow(dateKey)} className="p-1 bg-white border border-purple-200 rounded text-indigo-600 hover:bg-indigo-50 text-xs flex items-center gap-1 shadow-sm"><Plus size={14} strokeWidth={3}/> 행 추가</button>
+                        <button onClick={() => removeLastRow(dateKey)} className="p-1 bg-white border border-purple-200 rounded text-red-600 hover:bg-red-50 text-xs flex items-center gap-1 shadow-sm"><Minus size={14} strokeWidth={3}/> 행 제거</button>
+                      </div>
+                    </div>
+                    <div style={{ width: colWidths.startTime, flexShrink: 0 }} className="flex items-center justify-center text-red-600">9:00</div>
+                    <div style={{ width: colWidths.duration, flexShrink: 0 }} className="flex items-center justify-center text-purple-700">(분)</div>
+                    <div style={{ width: colWidths.endTime, flexShrink: 0 }} className="flex items-center justify-center text-red-600">10:00</div>
+                    <div style={{ width: colWidths.hours, flexShrink: 0 }} className="flex items-center justify-center font-black text-lg">{dayTotalHours.toFixed(2)}</div>
+                    <div style={{ width: colWidths.action, flexShrink: 0 }}></div>
+                  </div>
+
+                  {/* 데이터 입력 행 */}
+                  {dayLogs.length === 0 ? (
+                    <div className="px-6 py-4 text-center text-gray-400 text-sm bg-white">데이터 없음</div>
+                  ) : (
+                    <div>
+                      {dayLogs.map((row, index) => (
+                        <div 
+                          key={row.id} 
+                          style={{ height: rowHeights[row.id] || 48, minHeight: 48 }}
+                          className="relative flex items-stretch border-b border-gray-200 hover:bg-gray-50 transition-colors bg-white group"
+                        >
+                          <div 
+                            onMouseDown={(e) => startRowResize(e, row.id)} 
+                            className="absolute bottom-0 left-0 right-0 h-1.5 cursor-row-resize bg-transparent hover:bg-purple-400 opacity-50 z-10 transition-colors"
+                          />
+
+                          <div style={{ width: colWidths.no, flexShrink: 0 }} className="border-r border-gray-100 flex items-center justify-center font-bold text-gray-600 bg-gray-50">
+                            {index + 1}
+                          </div>
+                          
+                          <div style={{ width: colWidths.category, flexShrink: 0 }} className="border-r border-gray-100 flex items-center p-1">
+                            <select value={row.category} onChange={(e) => handleRowChange(dateKey, row.id, 'category', e.target.value)} className="w-full h-full p-1 bg-transparent text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded font-medium text-gray-800 appearance-none">
+                              <option value="">선택</option>
+                              {Object.keys(TASK_CATEGORIES).map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                            </select>
+                          </div>
+
+                          <div style={{ width: colWidths.subCategory, flexShrink: 0 }} className="border-r border-gray-100 flex items-center p-1">
+                            <select value={row.subCategory} onChange={(e) => handleRowChange(dateKey, row.id, 'subCategory', e.target.value)} disabled={!row.category} className="w-full h-full p-1 bg-transparent text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded font-medium text-gray-800 disabled:text-gray-300 appearance-none text-sm">
+                              <option value="">{row.category ? "선택" : ""}</option>
+                              {row.category && TASK_CATEGORIES[row.category].map(sub => <option key={sub} value={sub}>{sub}</option>)}
+                            </select>
+                          </div>
+
+                          <div style={{ width: colWidths.details, flexShrink: 0 }} className="border-r border-gray-100 flex items-center p-1">
+                            <textarea 
+                              value={row.details} 
+                              onChange={(e) => handleRowChange(dateKey, row.id, 'details', e.target.value)} 
+                              className="w-full h-full p-1 focus:border-indigo-400 focus:outline-none bg-transparent resize-none overflow-hidden leading-tight" 
+                              placeholder="내용 입력"
+                            />
+                          </div>
+
+                          <div style={{ width: colWidths.remarks, flexShrink: 0 }} className="border-r border-gray-100 flex items-center p-1">
+                            <textarea 
+                              value={row.remarks} 
+                              onChange={(e) => handleRowChange(dateKey, row.id, 'remarks', e.target.value)} 
+                              className="w-full h-full p-1 focus:border-indigo-400 focus:outline-none bg-transparent resize-none overflow-hidden leading-tight"
+                            />
+                          </div>
+
+                          <div style={{ width: colWidths.startTime, flexShrink: 0 }} className="border-r border-gray-100 flex items-center justify-center p-1">
+                            <input type="time" value={row.startTime} onChange={(e) => handleRowChange(dateKey, row.id, 'startTime', e.target.value)} className="w-full h-full text-center bg-transparent focus:outline-none font-medium text-[15px]" style={{ textAlignLast: 'center' }}/>
+                          </div>
+
+                          <div style={{ width: colWidths.duration, flexShrink: 0 }} className="border-r border-gray-100 flex items-center justify-center p-1">
+                            <input type="number" value={row.duration} onChange={(e) => handleRowChange(dateKey, row.id, 'duration', e.target.value)} className="w-full h-full text-center bg-transparent focus:outline-none font-bold text-gray-700" placeholder="분"/>
+                          </div>
+
+                          <div style={{ width: colWidths.endTime, flexShrink: 0 }} className="border-r border-gray-100 flex items-center justify-center text-gray-600 bg-gray-50 font-bold text-[15px]">
+                            {row.endTime || "-"}
+                          </div>
+
+                          <div style={{ width: colWidths.hours, flexShrink: 0 }} className="flex items-center justify-center font-black text-purple-700 bg-purple-50 text-base">
+                            {row.hours !== "0.00" ? row.hours : ""}
+                          </div>
+
+                          <div style={{ width: colWidths.action, flexShrink: 0 }} className="flex items-center justify-center p-1">
+                            <button onClick={() => removeSpecificRow(dateKey, row.id)} className="text-gray-300 hover:text-red-500 transition-colors">
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
